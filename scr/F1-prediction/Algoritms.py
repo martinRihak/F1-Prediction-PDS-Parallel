@@ -13,7 +13,7 @@ from sklearn.base import BaseEstimator, ClusterMixin
 from joblib import Parallel, delayed
 import matplotlib.pyplot as plt
 import pandas as pd
-
+import os
 # --- Model Definitions ---
 class NeuralNetwork(nn.Module):
     def __init__(self, input_size, hidden_size=256):
@@ -182,7 +182,7 @@ def train_parallel_kmeans(X, n_clusters=3):
 # --- Data Loading and Preprocessing ---
 def load_data():
     data = pd.read_csv('../Dataset/output/2024.csv')
-    data = pd.concat([data] * 10, ignore_index=True)
+    data = pd.concat([data] , ignore_index=True)
 
     # Vytvoření cílové proměnné
     data['winner'] = (data['positionOrder'] == 1).astype(int)
@@ -204,6 +204,7 @@ def load_data():
     return X_train, y_train, X_test, y_test
 
 # --- Evaluation and Visualization ---
+"""
 def visualize_results(results):
     methods = [r[0] for r in results]
     times = [r[1] for r in results]
@@ -233,29 +234,51 @@ def visualize_results(results):
     plt.tight_layout()
     plt.savefig('comparison.png')
     print("Výsledky uloženy jako 'comparison.png'")
-
+    """
+def visualize_results(results, suffix):
+    methods, times, accuracies, f1_scores = zip(*results)
+    plt.figure(figsize=(10, 6))
+    plt.bar(methods, times, color='skyblue')
+    plt.title(f'Čas trénování – {suffix}')
+    plt.ylabel('Čas (s)')
+    plt.xticks(rotation=45)
+    plt.tight_layout()
+    plt.savefig(f'../Dataset/output/main/comparison_{suffix}.png')
+    plt.close()
 # --- Main Execution ---
 def main():
     X_train, y_train, X_test, y_test = load_data()
     
-    results = []
+    if not os.path.exists('../Dataset/output/main'):
+        os.makedirs('../Dataset/output/main')
     
-    # Random Forest Sequential (different settings)
-    rf_seq_time, rf_seq_acc, rf_seq_f1 = train_rf(X_train, y_train, X_test, y_test, parallel=False, n_estimators=500, max_depth=10)
-    results.append(("RF Seq (500, 10)", rf_seq_time, rf_seq_acc, rf_seq_f1))
-    
-    # Random Forest Parallel (different settings)
-    rf_par_time, rf_par_acc, rf_par_f1 = train_rf(X_train, y_train, X_test, y_test, parallel=True, n_estimators=2000, max_depth=30)
-    results.append(("RF Par (2000, 30)", rf_par_time, rf_par_acc, rf_par_f1))
-    
-    # Logistic Regression Sequential (different settings)
-    lr_seq_time, lr_seq_acc, lr_seq_f1 = train_lr(X_train, y_train, X_test, y_test, parallel=False, max_iter=500)
-    results.append(("LR Seq (500)", lr_seq_time, lr_seq_acc, lr_seq_f1))
-    
-    # Logistic Regression Parallel (different settings)
-    lr_par_time, lr_par_acc, lr_par_f1 = train_lr(X_train, y_train, X_test, y_test, parallel=True, max_iter=2000)
-    results.append(("LR Par (2000)", lr_par_time, lr_par_acc, lr_par_f1))
-    
+    #cyklus na vypocet
+    for run in range(1,3):
+        print(f"Spousim opakovani {run}")
+        
+        results = []
+          # Random Forest Sequential (different settings)
+        rf_seq_time, rf_seq_acc, rf_seq_f1 = train_rf(X_train, y_train, X_test, y_test, parallel=False, n_estimators=500, max_depth=10)
+        results.append(("RF Seq (500, 10)", rf_seq_time, rf_seq_acc, rf_seq_f1))
+        
+        # Random Forest Parallel (different settings)
+        rf_par_time, rf_par_acc, rf_par_f1 = train_rf(X_train, y_train, X_test, y_test, parallel=True, n_estimators=2000, max_depth=30)
+        results.append(("RF Par (2000, 30)", rf_par_time, rf_par_acc, rf_par_f1))
+        
+        # Logistic Regression Sequential (different settings)
+        lr_seq_time, lr_seq_acc, lr_seq_f1 = train_lr(X_train, y_train, X_test, y_test, parallel=False, max_iter=500)
+        results.append(("LR Seq (500)", lr_seq_time, lr_seq_acc, lr_seq_f1))
+
+        # Logistic Regression Parallel (different settings)
+        lr_par_time, lr_par_acc, lr_par_f1 = train_lr(X_train, y_train, X_test, y_test, parallel=True, max_iter=2000)
+        results.append(("LR Par (2000)", lr_par_time, lr_par_acc, lr_par_f1))
+        
+        visualize_results(results,f"run{run}") 
+        with  open(f"../Dataset/output/main/result_basic_{run}",'w') as f:
+            for method, time, acc,f1 in results:
+                f.write(f"{method}:Cas: {time:.2f}s, Presnost: {acc:.4f}, F1-score: {f1:.4f} \n ")
+        
+    """
     # Neural Network Sequential (CPU) (different settings)
     nn_cpu_time, nn_cpu_acc, nn_cpu_f1 = train_nn_cpu(X_train, y_train, X_test, y_test, epochs=100, hidden_size=256)
     results.append(("NN Seq CPU (100, 256)", nn_cpu_time, nn_cpu_acc, nn_cpu_f1))
@@ -274,6 +297,6 @@ def main():
     results.append(("Parallel K-means (5)", kmeans_time, None, None))
     
     visualize_results(results)
-
+    """
 if __name__ == "__main__":
     main()
