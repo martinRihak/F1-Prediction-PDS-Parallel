@@ -13,7 +13,10 @@ from sklearn.base import BaseEstimator, ClusterMixin
 from joblib import Parallel, delayed
 import matplotlib.pyplot as plt
 import pandas as pd
+import subprocess
 import os
+import sys
+
 # --- Model Definitions ---
 class NeuralNetwork(nn.Module):
     def __init__(self, input_size, hidden_size=256):
@@ -51,15 +54,15 @@ class ParallelKMeans(BaseEstimator, ClusterMixin):
         return np.argmin(distances, axis=1)
 
 # --- Training Functions ---
-def train_rf(X_train, y_train, X_test, y_test, parallel=False, n_estimators=1000, max_depth=20):
-    rf = RandomForestClassifier(n_estimators=n_estimators, max_depth=max_depth, n_jobs=-1 if parallel else 1, random_state=42)
+def train_rf(X_train, y_train, X_test, y_test, parallel=False, n_estimators=1000, max_depth=20, n_jobs=1):
+    rf = RandomForestClassifier(n_estimators=n_estimators, max_depth=max_depth, n_jobs=n_jobs if parallel else 1, random_state=42)
     start_time = time.time()
     rf.fit(X_train, y_train)
     train_time = time.time() - start_time
     y_pred = rf.predict(X_test)
     accuracy = accuracy_score(y_test, y_pred)
     f1 = f1_score(y_test, y_pred)
-    print(f"Random Forest {'Paralelní' if parallel else 'Sekvenční'} (n_estimators={n_estimators}, max_depth={max_depth}): Čas: {train_time:.2f}s, Přesnost: {accuracy:.4f}, F1-skóre: {f1:.4f}")
+    print(f"Random Forest {'Paralelní' if parallel else 'Sekvenční'} (n_estimators={n_estimators}, max_depth={max_depth}, n_jobs={n_jobs}): Čas: {train_time:.2f}s, Přesnost: {accuracy:.4f}, F1-skóre: {f1:.4f}")
     return train_time, accuracy, f1
 
 def train_lr(X_train, y_train, X_test, y_test, parallel=False, max_iter=1000):
@@ -131,6 +134,26 @@ def train_nn_gpu(X_train, y_train, X_test, y_test, epochs=50, hidden_size=256):
     print(f"Neural Network GPU (epochs={epochs}, hidden_size={hidden_size}): Čas: {train_time:.2f}s, Přesnost: {accuracy:.4f}, F1-skóre: {f1:.4f}")
     return train_time, accuracy, f1
 
+def run_mpi_with_procs(n_procs, X_train, y_train, X_test, y_test, epochs=50, hidden_size=256):
+    # Save data to files for transfer between processes
+    np.save('X_train.npy', X_train.values)
+    np.save('y_train.npy', y_train.values)
+    np.save('X_test.npy', X_test.values)
+    np.save('y_test.npy', y_test.values)
+    
+    # Run MPI script
+    cmd = f"mpirun -n {n_procs} python -c \"from Algoritms import train_nn_mpi; train_nn_mpi(np.load('X_train.npy'), np.load('y_train.npy'), np.load('X_test.npy'), np.load('y_test.npy'), {epochs}, {hidden_size})\""
+    result = subprocess.run(cmd, shell=True, capture_output=True, text=True)
+    output = result.stdout
+    for line in output.splitlines():
+        if "Čas:" in line:
+            parts = line.split(", ")
+            time_str = parts[0].split(": ")[1].replace("s", "")
+            acc_str = parts[1].split(": ")[1]
+            f1_str = parts[2].split(": ")[1]
+            return float(time_str), float(acc_str), float(f1_str)
+    return None, None, None
+
 def train_nn_mpi(X_train, y_train, X_test, y_test, epochs=50, hidden_size=256):
     comm = MPI.COMM_WORLD
     rank = comm.Get_rank()
@@ -144,8 +167,8 @@ def train_nn_mpi(X_train, y_train, X_test, y_test, epochs=50, hidden_size=256):
     criterion = nn.BCELoss()
     optimizer = torch.optim.Adam(model.parameters())
     
-    X_train_local_tensor = torch.tensor(X_train_local.values, dtype=torch.float32)
-    y_train_local_tensor = torch.tensor(y_train_local.values, dtype=torch.float32).view(-1, 1)
+    X_train_local_tensor = torch.tensor(X_train_local, dtype=torch.float32)
+    y_train_local_tensor = torch.tensor(y_train_local, dtype=torch.float32).view(-1, 1)
     
     start_time = time.time()
     for epoch in range(epochs):
@@ -160,8 +183,8 @@ def train_nn_mpi(X_train, y_train, X_test, y_test, epochs=50, hidden_size=256):
     train_time = time.time() - start_time
     
     if rank == 0:
-        X_test_tensor = torch.tensor(X_test.values, dtype=torch.float32)
-        y_test_tensor = torch.tensor(y_test.values, dtype=torch.float32).view(-1, 1)
+        X_test_tensor = torch.tensor(X_test, dtype=torch.float32)
+        y_test_tensor = torch.tensor(y_test, dtype=torch.float32).view(-1, 1)
         with torch.no_grad():
             outputs = model(X_test_tensor)
             y_pred = (outputs > 0.5).float()
@@ -182,30 +205,29 @@ def train_parallel_kmeans(X, n_clusters=3):
 # --- Data Loading and Preprocessing ---
 def load_data():
     data = pd.read_csv('../Dataset/output/2024.csv')
-    data = pd.concat([data] , ignore_index=True)
+    data = pd.concat([data] * 10, ignore_index=True)
 
-    # Vytvoření cílové proměnné
+    # Create target variable
     data['winner'] = (data['positionOrder'] == 1).astype(int)
 
-    # Výběr příznaků
-    features = ['grid', 'points', 'qualifying_position', 
-                'avg_position_last_5', 'avg_position_circuit',
-                'constructor_points', 'grid_qual_diff', 'position']
+    # Select features
+    features = ['grid', 'points', 'qualifying_position', 'points','wins', 'fastestLap', 'fastestLapSpeed',
+                'avg_position_last_5', 'avg_position_circuit','points_before_race',  'points_per-race'   ,
+                'constructor_points','constructor_wins', 'grid_qual_diff', 'position']
     X = data[features].fillna(data[features].mean())
     y = data['winner']
 
-    # Škálování příznaků
+    # Scale features
     scaler = StandardScaler()
     X_scaled = scaler.fit_transform(X)
     X_scaled = pd.DataFrame(X_scaled, columns=features)
 
-    # Rozdělení dat
+    # Split data
     X_train, X_test, y_train, y_test = train_test_split(X_scaled, y, test_size=0.2, random_state=42)
     return X_train, y_train, X_test, y_test
 
 # --- Evaluation and Visualization ---
-"""
-def visualize_results(results):
+def visualize_results(results, iteration):
     methods = [r[0] for r in results]
     times = [r[1] for r in results]
     accuracies = [r[2] for r in results if r[2] is not None]
@@ -215,88 +237,67 @@ def visualize_results(results):
     plt.figure(figsize=(18, 5))
     plt.subplot(1, 3, 1)
     plt.bar(methods, times, color='skyblue')
-    plt.title('Čas trénování (s)')
+    plt.title(f'Čas trénování (s) - Iterace {iteration}')
     plt.ylabel('Čas (s)')
     plt.xticks(rotation=45)
     
     plt.subplot(1, 3, 2)
     plt.bar(acc_methods, accuracies, color='lightgreen')
-    plt.title('Přesnost')
+    plt.title(f'Přesnost - Iterace {iteration}')
     plt.ylabel('Přesnost')
     plt.xticks(rotation=45)
     
     plt.subplot(1, 3, 3)
     plt.bar(acc_methods, f1_scores, color='lightcoral')
-    plt.title('F1-skóre')
+    plt.title(f'F1-skóre - Iterace {iteration}')
     plt.ylabel('F1-skóre')
     plt.xticks(rotation=45)
     
     plt.tight_layout()
-    plt.savefig('comparison.png')
-    print("Výsledky uloženy jako 'comparison.png'")
-    """
-def visualize_results(results, suffix):
-    methods, times, accuracies, f1_scores = zip(*results)
-    plt.figure(figsize=(10, 6))
-    plt.bar(methods, times, color='skyblue')
-    plt.title(f'Čas trénování – {suffix}')
-    plt.ylabel('Čas (s)')
-    plt.xticks(rotation=45)
-    plt.tight_layout()
-    plt.savefig(f'../Dataset/output/main/comparison_{suffix}.png')
-    plt.close()
+    plt.savefig(f'comparison_iteration_{iteration}.png')
+    print(f"Výsledky uloženy pro iteraci {iteration}")
+
 # --- Main Execution ---
 def main():
     X_train, y_train, X_test, y_test = load_data()
     
-    if not os.path.exists('../Dataset/output/main'):
-        os.makedirs('../Dataset/output/main')
-    
-    #cyklus na vypocet
-    for run in range(1,3):
-        print(f"Spousim opakovani {run}")
-        
+    num_iterations = 1 
+    for iteration in range(1, num_iterations + 1):
+        print(f"\nIterace {iteration}")
         results = []
-          # Random Forest Sequential (different settings)
-        rf_seq_time, rf_seq_acc, rf_seq_f1 = train_rf(X_train, y_train, X_test, y_test, parallel=False, n_estimators=500, max_depth=10)
+        
+        # Random Forest Sequential
+        rf_seq_time, rf_seq_acc, rf_seq_f1 = train_rf(X_train, y_train, X_test, y_test, parallel=False, n_estimators=1000, max_depth=20)
         results.append(("RF Seq (500, 10)", rf_seq_time, rf_seq_acc, rf_seq_f1))
         
-        # Random Forest Parallel (different settings)
-        rf_par_time, rf_par_acc, rf_par_f1 = train_rf(X_train, y_train, X_test, y_test, parallel=True, n_estimators=2000, max_depth=30)
-        results.append(("RF Par (2000, 30)", rf_par_time, rf_par_acc, rf_par_f1))
+        # Random Forest Parallel
+        rf_par_time, rf_par_acc, rf_par_f1 = train_rf(X_train, y_train, X_test, y_test, parallel=True, n_estimators=1000, max_depth=20, n_jobs=4)
+        results.append(("RF Par (2000, 30, n_jobs=4)", rf_par_time, rf_par_acc, rf_par_f1))
         
-        # Logistic Regression Sequential (different settings)
+        # Logistic Regression Sequential
         lr_seq_time, lr_seq_acc, lr_seq_f1 = train_lr(X_train, y_train, X_test, y_test, parallel=False, max_iter=500)
         results.append(("LR Seq (500)", lr_seq_time, lr_seq_acc, lr_seq_f1))
-
-        # Logistic Regression Parallel (different settings)
-        lr_par_time, lr_par_acc, lr_par_f1 = train_lr(X_train, y_train, X_test, y_test, parallel=True, max_iter=2000)
+        
+        # Logistic Regression Parallel
+        lr_par_time, lr_par_acc, lr_par_f1 = train_lr(X_train, y_train, X_test, y_test, parallel=True, max_iter=500)
         results.append(("LR Par (2000)", lr_par_time, lr_par_acc, lr_par_f1))
         
-        visualize_results(results,f"run{run}") 
-        with  open(f"../Dataset/output/main/result_basic_{run}",'w') as f:
-            for method, time, acc,f1 in results:
-                f.write(f"{method}:Cas: {time:.2f}s, Presnost: {acc:.4f}, F1-score: {f1:.4f} \n ")
+        # Neural Network Sequential (CPU)
+        nn_cpu_time, nn_cpu_acc, nn_cpu_f1 = train_nn_cpu(X_train, y_train, X_test, y_test, epochs=100, hidden_size=256)
+        results.append(("NN Seq CPU (100, 256)", nn_cpu_time, nn_cpu_acc, nn_cpu_f1))
         
-    """
-    # Neural Network Sequential (CPU) (different settings)
-    nn_cpu_time, nn_cpu_acc, nn_cpu_f1 = train_nn_cpu(X_train, y_train, X_test, y_test, epochs=100, hidden_size=256)
-    results.append(("NN Seq CPU (100, 256)", nn_cpu_time, nn_cpu_acc, nn_cpu_f1))
-    
-    # Neural Network Parallel (GPU) (different settings)
-    nn_gpu_time, nn_gpu_acc, nn_gpu_f1 = train_nn_gpu(X_train, y_train, X_test, y_test, epochs=100, hidden_size=256)
-    results.append(("NN Par GPU (100, 256)", nn_gpu_time, nn_gpu_acc, nn_gpu_f1))
-    
-    # Neural Network MPI (different settings)
-    nn_mpi_time, nn_mpi_acc, nn_mpi_f1 = train_nn_mpi(X_train, y_train, X_test, y_test, epochs=75, hidden_size=192)
-    if nn_mpi_time is not None:
-        results.append(("NN MPI (75, 192)", nn_mpi_time, nn_mpi_acc, nn_mpi_f1))
-    
-    # Parallel K-means (different settings)
-    kmeans_time = train_parallel_kmeans(X_train.values, n_clusters=5)
-    results.append(("Parallel K-means (5)", kmeans_time, None, None))
-    
-    visualize_results(results)
-    """
+        # Neural Network Parallel (GPU)
+        nn_gpu_time, nn_gpu_acc, nn_gpu_f1 = train_nn_gpu(X_train, y_train, X_test, y_test, epochs=100, hidden_size=256)
+        results.append(("NN Par GPU (100, 256)", nn_gpu_time, nn_gpu_acc, nn_gpu_f1))
+        
+        # Neural Network MPI with varying processes
+        for n_procs in [1, 2, 4]:
+            nn_mpi_time, nn_mpi_acc, nn_mpi_f1 = run_mpi_with_procs(n_procs, X_train, y_train, X_test, y_test, epochs=75, hidden_size=192)
+            if nn_mpi_time is not None:
+                results.append((f"NN MPI (75, 192, n_procs={n_procs})", nn_mpi_time, nn_mpi_acc, nn_mpi_f1))
+        
+        # Save results for this iteration
+        visualize_results(results, iteration)
+
 if __name__ == "__main__":
     main()
